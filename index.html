@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="theme-color" content="#0f1416">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Контур">
+  <title>Контур бороди</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Головний екран: список збережених контурів -->
+  <section id="home" class="screen">
+    <header class="bar">
+      <h1>Контур<span class="dot">.</span></h1>
+      <p class="sub">Голіть бороду по власній збереженій лінії</p>
+    </header>
+    <div class="scroll">
+      <div id="templates" class="templates"></div>
+      <div id="empty" class="empty" hidden>
+        <svg viewBox="0 0 120 120" aria-hidden="true"><path d="M30 40c0 30 10 55 30 60s30-30 30-60" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="6 6"/><circle cx="60" cy="45" r="28" fill="none" stroke="currentColor" stroke-width="2" opacity=".4"/></svg>
+        <p><b>Поки що немає контуру.</b><br>Сфотографуйтесь з охайною бородою (або після барбера) і позначте лінії шиї та щік. Далі камера накладатиме їх на ваше обличчя під час гоління.</p>
+      </div>
+    </div>
+    <footer class="actions">
+      <button id="btnNew" class="primary big">Новий контур з фото</button>
+    </footer>
+  </section>
+
+  <!-- Зйомка фото -->
+  <section id="capture" class="screen" hidden>
+    <header class="bar row">
+      <button class="ghost" data-back>‹ Назад</button>
+      <h2>Фото-шаблон</h2>
+    </header>
+    <div class="stage">
+      <video id="capVideo" playsinline muted autoplay></video>
+      <div class="oval" aria-hidden="true"></div>
+      <div id="capCount" class="count" hidden></div>
+      <p class="hint">Дивіться прямо, обличчя в овалі, рівне світло спереду</p>
+    </div>
+    <footer class="actions row">
+      <label class="ghost file">Обрати з галереї<input id="capFile" type="file" accept="image/*"></label>
+      <button id="btnShot" class="primary">Зробити фото (3 с)</button>
+    </footer>
+  </section>
+
+  <!-- Редактор контуру -->
+  <section id="editor" class="screen" hidden>
+    <header class="bar row">
+      <button class="ghost" data-back>‹ Скасувати</button>
+      <input id="tplName" class="name" value="Мій контур" aria-label="Назва контуру">
+    </header>
+    <div class="stage edit">
+      <canvas id="edCanvas"></canvas>
+      <div id="edBusy" class="busy" hidden>Шукаю обличчя…</div>
+    </div>
+    <div class="tools">
+      <div id="lineChips" class="chips"></div>
+      <div class="row tight">
+        <button id="btnDelPt" class="ghost sm" disabled>Видалити точку</button>
+        <button id="btnAddLine" class="ghost sm">+ Лінія</button>
+        <button id="btnDelLine" class="ghost sm" disabled>Видалити лінію</button>
+        <button id="btnReset" class="ghost sm">Авто</button>
+      </div>
+      <p class="tip">Тягніть точки. Торкніться лінії між точками, щоб додати нову.</p>
+    </div>
+    <footer class="actions">
+      <button id="btnSave" class="primary big">Зберегти контур</button>
+    </footer>
+  </section>
+
+  <!-- Живий режим -->
+  <section id="live" class="screen live" hidden>
+    <canvas id="liveCanvas"></canvas>
+    <video id="liveVideo" playsinline muted autoplay hidden></video>
+    <div class="overlay-top">
+      <button class="round" data-back aria-label="Закрити">✕</button>
+      <div id="liveStatus" class="status">Запуск камери…</div>
+      <button id="btnFreeze" class="round" aria-label="Пауза">❚❚</button>
+    </div>
+    <canvas id="liveThumb" class="thumb" aria-label="Збережений шаблон"></canvas>
+    <div class="overlay-bottom">
+      <div class="row tight">
+        <button id="btnMirror" class="pill on">Дзеркало</button>
+        <button id="btnColor" class="pill">Колір</button>
+        <button id="btnZone" class="pill">Зона гоління</button>
+      </div>
+      <label class="slider">Товщина <input id="lineWidth" type="range" min="1" max="8" value="3"></label>
+    </div>
+  </section>
+
+  <div id="toast" class="toast" hidden></div>
+  <script type="module" src="app.js"></script>
+</body>
+</html>
