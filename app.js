@@ -84,7 +84,7 @@ function renderHome() {
     const ed = Object.assign(document.createElement('button'), { className: 'ghost', textContent: 'Змінити' });
     const del = Object.assign(document.createElement('button'), { className: 'ghost', textContent: '✕', title: 'Видалити' });
     go.onclick = () => startLive(tpl);
-    ed.onclick = () => openEditor({ photos: tpl.photos || [{ role: 'front', data: tpl.photo }], P: tpl.P, lines: tpl.lines, tpl });
+    ed.onclick = () => openEditor({ photos: tpl.photos || [{ role: 'front', data: tpl.photo, P: tpl.P }], lines: tpl.lines, tpl });
     del.onclick = () => {
       if (del.dataset.armed) {
         saveTemplates(loadTemplates().filter((t) => t.id !== tpl.id)); renderHome();
@@ -258,53 +258,61 @@ $('#btnAnalyze').onclick = async () => {
   openEditor({ photos });
 };
 
-// Розпізнає обличчя на кожному фото і будує лінії. Повертає {P, lines, report}
-// або кидає помилку з текстом для користувача.
-async function runAnalysis(photos, onProgress) {
+// Розпізнає обличчя на кожному фото. Повертає [{role, data, img, P, landmarks}];
+// P = null, якщо обличчя на фото не знайдено. Кидає помилку, якщо його немає на анфасі.
+async function loadPhotos(photos, onProgress) {
   const lm = await getLandmarker('IMAGE');
-  const detected = [];
+  const out = [];
   for (const p of photos) {
     onProgress?.(`Шукаю обличчя: ${STEPS.find((s) => s.role === p.role)?.title || p.role}…`);
     const img = await loadImage(p.data);
-    const r = lm.detect(img);
-    const landmarks = r.faceLandmarks?.[0];
-    if (!landmarks) {
-      if (p.role === 'front') throw new Error('На фото анфас не знайдено обличчя. Перезніміть його.');
-      continue; // бічний кадр без обличчя просто пропускаємо
-    }
-    detected.push({ role: p.role, img, landmarks });
+    let landmarks = null;
+    if (p.P && p.landmarks) landmarks = p.landmarks;
+    else landmarks = lm.detect(img).faceLandmarks?.[0] || null;
+    if (!landmarks && p.role === 'front') throw new Error('На фото анфас не знайдено обличчя. Перезніміть його.');
+    out.push({ role: p.role, data: p.data, img, landmarks, P: landmarks ? toPx(landmarks, img.width, img.height) : null });
   }
+  return out;
+}
+
+// Будує лінії за всіма фото, на яких є обличчя. Повертає {lines (у пікселях анфасу), report, debug}.
+async function runAnalysis(loaded, onProgress) {
+  const detected = loaded.filter((p) => p.P);
   const front = detected.find((p) => p.role === 'front');
-  const P = toPx(front.landmarks, front.img.width, front.img.height);
   onProgress?.('Шукаю межу бороди…');
   await new Promise((r) => setTimeout(r, 30));
-  const { lines, report, debug } = analyzeBeard(detected, P);
-  report.skipped = photos.length - detected.length;
-  return { P, lines, report, debug, frontImg: front.img };
+  const { lines, report, debug } = analyzeBeard(detected, front.P);
+  report.skipped = loaded.length - detected.length;
+  return { lines, report, debug };
 }
 
 // ---------- Редактор ----------
-const ed = { img: null, P: null, lines: [], active: 0, sel: -1, drag: null, tpl: null, view: null, photos: [], auto: null };
+// Контур зберігається один — як прив'язки до сітки обличчя (anchors). На кожному
+// з чотирьох фото він показується через орієнтири саме цього фото, і правка на
+// будь-якому фото змінює той самий спільний контур.
+const ed = { photos: [], cur: 0, lines: [], active: 0, sel: -1, drag: null, tpl: null, view: null, auto: null };
 
-// draft: { photos: [{role, data}], P?, lines?, tpl? }. Без P і lines — запускає аналіз.
+const curPhoto = () => ed.photos[ed.cur];
+const frontPhoto = () => ed.photos.find((p) => p.role === 'front') || ed.photos[0];
+const linePts = (l, P = curPhoto().P) => l.anchors.map((a) => resolvePoint(a, P));
+const toAnchors = (points, P) => points.map((p) => anchorPoint(p, P));
+
+// draft: { photos: [{role, data, P?, landmarks?}], lines? (з anchors), tpl? }. Без lines — запускає аналіз.
 async function openEditor(draft) {
   show('editor');
-  ed.tpl = draft.tpl || null; ed.sel = -1; ed.active = 0; ed.drag = null;
-  ed.photos = draft.photos; ed.auto = null;
+  ed.tpl = draft.tpl || null; ed.sel = -1; ed.active = 0; ed.drag = null; ed.auto = null;
   $('#tplName').value = draft.tpl?.name || 'Мій контур';
   $('#edReport').textContent = '';
   const busy = $('#edBusy'); busy.hidden = false; busy.textContent = 'Шукаю обличчя…';
-  const frontData = draft.photos.find((p) => p.role === 'front')?.data || draft.photos[0].data;
-  ed.photo = frontData;
   try {
-    if (draft.P && draft.lines) {
-      ed.img = await loadImage(frontData);
-      ed.P = draft.P;
-      ed.lines = draft.lines.map((l) => ({ ...l, points: l.points.map((p) => [...p]) }));
+    ed.photos = await loadPhotos(draft.photos, (t) => (busy.textContent = t));
+    ed.cur = ed.photos.indexOf(frontPhoto());
+    if (draft.lines?.every((l) => l.anchors)) {
+      ed.lines = draft.lines.map((l) => ({ ...l, anchors: l.anchors.map((a) => ({ t: a.t, w: [...a.w] })) }));
     } else {
-      const r = await runAnalysis(draft.photos, (t) => (busy.textContent = t));
-      ed.img = r.frontImg; ed.P = r.P; ed.auto = r;
-      ed.lines = withColors(r.lines);
+      const r = await runAnalysis(ed.photos, (t) => (busy.textContent = t));
+      ed.auto = r;
+      ed.lines = withColors(r.lines).map((l) => ({ ...l, anchors: toAnchors(l.points, frontPhoto().P) }));
       showReport(r.report);
     }
   } catch (err) {
@@ -314,7 +322,24 @@ async function openEditor(draft) {
     return show('home');
   }
   busy.hidden = true; cap.busy = false;
-  renderChips(); layoutEditor();
+  renderPhotoTabs(); renderChips(); layoutEditor();
+}
+
+function renderPhotoTabs() {
+  const box = $('#edPhotos'); box.innerHTML = '';
+  box.hidden = ed.photos.length < 2;
+  ed.photos.forEach((p, i) => {
+    const b = document.createElement('button');
+    b.className = 'step' + (i === ed.cur ? ' on' : '') + (p.P ? '' : ' off');
+    b.disabled = !p.P;
+    const ph = document.createElement('div'); ph.className = 'ph';
+    const im = new Image(); im.src = p.data; im.alt = ''; ph.append(im);
+    const lab = document.createElement('span');
+    lab.textContent = (STEPS.find((s) => s.role === p.role)?.title || p.role) + (p.P ? '' : ' · без обличчя');
+    b.append(ph, lab);
+    b.onclick = () => { ed.cur = i; ed.sel = -1; ed.drag = null; renderPhotoTabs(); renderChips(); layoutEditor(); };
+    box.append(b);
+  });
 }
 
 function showReport(r) {
@@ -323,7 +348,7 @@ function showReport(r) {
   const cheeks = (r.cheekA ? 1 : 0) + (r.cheekB ? 1 : 0);
   parts.push(cheeks === 2 ? 'обидві щоки знайдено' : cheeks === 1 ? 'одна щока знайдена' : 'щоки: типові лінії');
   if (r.skipped) parts.push(`${r.skipped} фото без обличчя пропущено`);
-  $('#edReport').textContent = `Аналіз ${r.photos} фото: ${parts.join(', ')}. Перевірте і підправте точки.`;
+  $('#edReport').textContent = `Аналіз ${r.photos} фото: ${parts.join(', ')}. Перевірте контур на кожному фото і підправте точки.`;
 }
 
 function withColors(lines) {
@@ -346,28 +371,29 @@ function renderChips() {
   });
   const l = ed.lines[ed.active];
   $('#btnDelLine').disabled = !l || ed.lines.length <= 1;
-  $('#btnDelPt').disabled = !(l && ed.sel >= 0 && l.points.length > 2);
+  $('#btnDelPt').disabled = !(l && ed.sel >= 0 && l.anchors.length > 2);
 }
 
 function lineLabel(l) {
   if (l.id === 'neck') return 'Лінія шиї';
   if (l.id.startsWith('cheek')) {
-    // на фото "ліва" сторона кадру — це права щока людини, якщо фото не дзеркальне;
-    // тому підписуємо за кадром, як людина бачить себе в дзеркалі
-    const cx = l.points.reduce((s, p) => s + p[0], 0) / l.points.length;
-    return cx < ed.P[1][0] ? 'Щока ліворуч' : 'Щока праворуч';
+    // підписуємо за кадром анфасу, як людина бачить себе в дзеркалі
+    const P = frontPhoto().P, pts = linePts(l, P);
+    const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
+    return cx < P[1][0] ? 'Щока ліворуч' : 'Щока праворуч';
   }
   return l.name || 'Лінія';
 }
 
 const edCanvas = $('#edCanvas');
 function layoutEditor() {
+  const { img, P } = curPhoto();
   const r = edCanvas.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   edCanvas.width = Math.round(r.width * dpr); edCanvas.height = Math.round(r.height * dpr);
-  const iw = ed.img.width, ih = ed.img.height;
+  const iw = img.width, ih = img.height;
   // масштабуємо так, щоб нижня половина обличчя займала екран
-  const xs = ed.P.map((p) => p[0]), ys = ed.P.map((p) => p[1]);
+  const xs = P.map((p) => p[0]), ys = P.map((p) => p[1]);
   const fw = Math.max(...xs) - Math.min(...xs);
   const cx = (Math.max(...xs) + Math.min(...xs)) / 2;
   const cy = Math.max(...ys) - fw * 0.05;
@@ -376,30 +402,31 @@ function layoutEditor() {
   ed.view = { s, ox: r.width / 2 - cx * s, oy: r.height / 2 - cy * s, dpr, w: r.width, h: r.height };
   drawEditor();
 }
-window.addEventListener('resize', () => { if (current === 'editor' && ed.img) layoutEditor(); });
+window.addEventListener('resize', () => { if (current === 'editor' && ed.photos.length) layoutEditor(); });
 
 function drawScene(ctx, s, ox, oy, lineW) {
   ctx.setTransform(s, 0, 0, s, ox, oy);
-  ctx.drawImage(ed.img, 0, 0);
+  ctx.drawImage(curPhoto().img, 0, 0);
   ed.lines.forEach((l, i) => {
     ctx.globalAlpha = i === ed.active ? 1 : 0.6;
-    strokeLine(ctx, l.points, l.color, lineW / s);
+    strokeLine(ctx, linePts(l), l.color, lineW / s);
   });
   ctx.globalAlpha = 1;
 }
 
 function drawEditor() {
   const ctx = edCanvas.getContext('2d');
-  const { s, ox, oy, dpr, w, h } = ed.view;
+  const { s, ox, oy, dpr, w } = ed.view;
+  const P = curPhoto().P;
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#05080a'; ctx.fillRect(0, 0, edCanvas.width, edCanvas.height);
   drawScene(ctx, s * dpr, ox * dpr, oy * dpr, 3 * dpr);
-  // налагодження (тільки ?demo): оцінка «бородатості» кожного орієнтира
-  if (DEMO && ed.auto?.debug) {
+  // налагодження (тільки ?demo, на анфасі): оцінка «бородатості» кожного орієнтира
+  if (DEMO && ed.auto?.debug && curPhoto().role === 'front') {
     const { scores, thr } = ed.auto.debug;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     scores.forEach((sc, i) => {
-      const x = ed.P[i][0] * s + ox, y = ed.P[i][1] * s + oy;
+      const x = P[i][0] * s + ox, y = P[i][1] * s + oy;
       ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2);
       ctx.fillStyle = sc > thr ? `rgba(255,60,60,${0.4 + 0.6 * sc})` : `rgba(80,160,255,${0.3 + 0.6 * (1 - sc)})`;
       ctx.fill();
@@ -407,30 +434,35 @@ function drawEditor() {
   }
   // точки активної лінії
   const l = ed.lines[ed.active];
+  const pts = l ? linePts(l) : [];
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-  l?.points.forEach((p, i) => {
+  pts.forEach((p, i) => {
     const x = p[0] * s + ox, y = p[1] * s + oy;
     ctx.beginPath(); ctx.arc(x, y, i === ed.sel ? 11 : 8, 0, Math.PI * 2);
     ctx.fillStyle = i === ed.sel ? l.color : 'rgba(0,0,0,.6)'; ctx.fill();
     ctx.lineWidth = 2.5; ctx.strokeStyle = l.color; ctx.stroke();
   });
-  // лупа під час перетягування
+  // лупа під час перетягування: збільшена ділянка з точкою рівно в центрі
   if (ed.drag) {
-    const p = l.points[ed.drag.i];
-    const R = 62, Z = 3;
-    const fx = p[0] * s + ox, fy = p[1] * s + oy;
+    const p = pts[ed.drag.i];
+    const R = 64, Z = 2.5;
+    const fx = p[0] * s + ox;
     const lx = fx < w / 2 ? w - R - 12 : R + 12, ly = R + 12;
     ctx.save();
-    ctx.beginPath(); ctx.arc(lx * dpr, ly * dpr, R * dpr, 0, Math.PI * 2);
-    ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.clip();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.beginPath(); ctx.arc(lx * dpr, ly * dpr, R * dpr, 0, Math.PI * 2); ctx.clip();
     const zs = s * Z * dpr;
     drawScene(ctx, zs, lx * dpr - p[0] * zs, ly * dpr - p[1] * zs, 2 * dpr);
     ctx.restore();
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.beginPath(); ctx.arc(lx, ly, R, 0, Math.PI * 2);
     ctx.lineWidth = 2; ctx.strokeStyle = '#fff'; ctx.stroke();
-    ctx.beginPath(); ctx.moveTo(lx - 8, ly); ctx.lineTo(lx + 8, ly); ctx.moveTo(lx, ly - 8); ctx.lineTo(lx, ly + 8);
-    ctx.strokeStyle = l.color; ctx.stroke();
+    ctx.beginPath(); ctx.arc(lx, ly, 5, 0, Math.PI * 2);
+    ctx.lineWidth = 1.5; ctx.strokeStyle = '#fff'; ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(lx - 16, ly); ctx.lineTo(lx - 7, ly); ctx.moveTo(lx + 7, ly); ctx.lineTo(lx + 16, ly);
+    ctx.moveTo(lx, ly - 16); ctx.lineTo(lx, ly - 7); ctx.moveTo(lx, ly + 7); ctx.lineTo(lx, ly + 16);
+    ctx.lineWidth = 2; ctx.strokeStyle = l.color; ctx.stroke();
   }
 }
 
@@ -444,30 +476,31 @@ function toScr(p) { const { s, ox, oy } = ed.view; return [p[0] * s + ox, p[1] *
 edCanvas.addEventListener('pointerdown', (e) => {
   if (!ed.view) return;
   const sp = evPoint(e);
+  const P = curPhoto().P;
   // 1) точка будь-якої лінії (активна має пріоритет)
   const order = [ed.active, ...ed.lines.map((_, i) => i).filter((i) => i !== ed.active)];
   for (const li of order) {
-    const pts = ed.lines[li].points;
+    const pts = linePts(ed.lines[li]);
     for (let i = 0; i < pts.length; i++) {
       const q = toScr(pts[i]);
       if (Math.hypot(q[0] - sp[0], q[1] - sp[1]) < 24) {
         ed.active = li; ed.sel = i;
         const ip = toImg(sp);
         ed.drag = { i, dx: pts[i][0] - ip[0], dy: pts[i][1] - ip[1] };
-        edCanvas.setPointerCapture(e.pointerId);
+        try { edCanvas.setPointerCapture(e.pointerId); } catch {}
         renderChips(); drawEditor(); return;
       }
     }
   }
   // 2) відрізок лінії — вставляємо нову точку
   for (const li of order) {
-    const pts = ed.lines[li].points;
+    const pts = linePts(ed.lines[li]);
     for (let i = 0; i < pts.length - 1; i++) {
       const { d } = distToSegment(sp, toScr(pts[i]), toScr(pts[i + 1]));
       if (d < 16) {
-        pts.splice(i + 1, 0, toImg(sp));
+        ed.lines[li].anchors.splice(i + 1, 0, anchorPoint(toImg(sp), P));
         ed.active = li; ed.sel = i + 1; ed.drag = { i: i + 1, dx: 0, dy: 0 };
-        edCanvas.setPointerCapture(e.pointerId);
+        try { edCanvas.setPointerCapture(e.pointerId); } catch {}
         renderChips(); drawEditor(); return;
       }
     }
@@ -477,7 +510,7 @@ edCanvas.addEventListener('pointerdown', (e) => {
 edCanvas.addEventListener('pointermove', (e) => {
   if (!ed.drag) return;
   const ip = toImg(evPoint(e));
-  ed.lines[ed.active].points[ed.drag.i] = [ip[0] + ed.drag.dx, ip[1] + ed.drag.dy];
+  ed.lines[ed.active].anchors[ed.drag.i] = anchorPoint([ip[0] + ed.drag.dx, ip[1] + ed.drag.dy], curPhoto().P);
   drawEditor();
 });
 const endDrag = () => { if (ed.drag) { ed.drag = null; drawEditor(); } };
@@ -486,15 +519,15 @@ edCanvas.addEventListener('pointercancel', endDrag);
 
 $('#btnDelPt').onclick = () => {
   const l = ed.lines[ed.active];
-  if (ed.sel >= 0 && l.points.length > 2) { l.points.splice(ed.sel, 1); ed.sel = -1; renderChips(); drawEditor(); }
+  if (ed.sel >= 0 && l.anchors.length > 2) { l.anchors.splice(ed.sel, 1); ed.sel = -1; renderChips(); drawEditor(); }
 };
 $('#btnAddLine').onclick = () => {
   // нова лінія — горизонтальний відрізок під носом (наприклад, для вусів)
-  const P = ed.P;
+  const P = curPhoto().P;
   const a = [P[61][0], P[2][1] + (P[0][1] - P[2][1]) * 0.4], b = [P[291][0], a[1]];
   const n = ed.lines.filter((l) => l.id.startsWith('custom')).length + 1;
   ed.lines.push({ id: 'custom' + Date.now(), name: 'Лінія ' + n, color: LINE_COLORS[ed.lines.length % LINE_COLORS.length], shave: null,
-    points: [a, [(a[0] + b[0]) / 2, a[1]], b] });
+    anchors: toAnchors([a, [(a[0] + b[0]) / 2, a[1]], b], P) });
   ed.active = ed.lines.length - 1; ed.sel = -1; renderChips(); drawEditor();
 };
 $('#btnDelLine').onclick = () => {
@@ -508,25 +541,27 @@ $('#btnReset').onclick = async () => {
     catch (err) { busy.hidden = true; return toast(err.message || 'Не вдалося проаналізувати', 4000); }
     busy.hidden = true;
   }
-  ed.lines = withColors(ed.auto.lines); ed.active = 0; ed.sel = -1;
+  ed.lines = withColors(ed.auto.lines).map((l) => ({ ...l, anchors: toAnchors(l.points, frontPhoto().P) }));
+  ed.active = 0; ed.sel = -1;
   showReport(ed.auto.report); renderChips(); drawEditor();
   toast('Лінії повернуто до автоматичних');
 };
 
 $('#btnSave').onclick = () => {
-  const P = ed.P;
+  const front = frontPhoto();
   const round = (p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10];
   const tpl = {
     id: ed.tpl?.id || 't' + Date.now(),
     name: $('#tplName').value.trim() || 'Мій контур',
     created: ed.tpl?.created || Date.now(),
-    photo: ed.photo,
-    photos: ed.photos,
-    P: P.map(round),
+    photo: front.data,
+    photos: ed.photos.map((p) => ({ role: p.role, data: p.data, P: p.P?.map(round) || null,
+      landmarks: p.landmarks?.map((q) => ({ x: q.x, y: q.y, z: q.z })) || null })),
+    P: front.P.map(round),
     lines: ed.lines.map((l) => ({
       id: l.id, name: l.name, color: l.color, shave: l.shave,
-      points: l.points.map(round),
-      anchors: l.points.map((p) => anchorPoint(p, P)),
+      points: linePts(l, front.P).map(round),
+      anchors: l.anchors.map((a) => ({ t: a.t, w: a.w.map((x) => Math.round(x * 10000) / 10000) })),
     })),
   };
   const list = loadTemplates().filter((t) => t.id !== tpl.id);

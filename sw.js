@@ -1,5 +1,5 @@
 // Офлайн-кеш: застосунок і модель працюють без інтернету після першого відкриття.
-const CACHE = 'beardguide-v2';
+const CACHE = 'beardguide-v3';
 const CORE = ['./', 'index.html', 'styles.css', 'app.js', 'face.js', 'manifest.webmanifest', 'icon.svg',
   'analyze.js', 'vendor/vision_bundle.mjs', 'vendor/face_landmarker.task'];
 
