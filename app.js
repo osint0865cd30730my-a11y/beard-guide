@@ -1,5 +1,6 @@
 import { FaceLandmarker, FilesetResolver } from './vendor/vision_bundle.mjs';
-import { toPx, anchorPoint, resolvePoint, defaultLines, tracePath, distToSegment } from './face.js';
+import { toPx, anchorPoint, resolvePoint, tracePath, distToSegment } from './face.js';
+import { analyzeBeard, headPose } from './analyze.js';
 
 const $ = (s) => document.querySelector(s);
 const STORE = 'beardguide.templates.v1';
@@ -43,7 +44,7 @@ async function getLandmarker(mode) {
 const screens = ['home', 'capture', 'editor', 'live'];
 let current = 'home';
 function show(name) {
-  if (current === 'capture') stopStream(capStream), (capStream = null);
+  if (current === 'capture') stopCapture();
   if (current === 'live') stopLive();
   screens.forEach((s) => ($('#' + s).hidden = s !== name));
   current = name;
@@ -75,7 +76,7 @@ function renderHome() {
     meta.className = 'meta';
     const b = document.createElement('b'); b.textContent = tpl.name;
     const small = document.createElement('small');
-    small.textContent = new Date(tpl.created).toLocaleDateString('uk-UA') + ' · ' + tpl.lines.length + ' лін.';
+    small.textContent = new Date(tpl.created).toLocaleDateString('uk-UA') + ' · ' + (tpl.photos?.length || 1) + ' фото · ' + tpl.lines.length + ' лін.';
     meta.append(b, small);
     const btns = document.createElement('div');
     btns.className = 'btns';
@@ -83,7 +84,7 @@ function renderHome() {
     const ed = Object.assign(document.createElement('button'), { className: 'ghost', textContent: 'Змінити' });
     const del = Object.assign(document.createElement('button'), { className: 'ghost', textContent: '✕', title: 'Видалити' });
     go.onclick = () => startLive(tpl);
-    ed.onclick = () => openEditor(tpl.photo, tpl);
+    ed.onclick = () => openEditor({ photos: tpl.photos || [{ role: 'front', data: tpl.photo }], P: tpl.P, lines: tpl.lines, tpl });
     del.onclick = () => {
       if (del.dataset.armed) {
         saveTemplates(loadTemplates().filter((t) => t.id !== tpl.id)); renderHome();
@@ -128,75 +129,201 @@ function strokeLine(ctx, pts, color, w) {
   ctx.restore();
 }
 
-// ---------- Зйомка ----------
-let capStream = null;
+// ---------- Зйомка чотирьох фото ----------
+// Кожен кадр має свою перевірку пози за орієнтирами відео. Коли поза правильна
+// 1,2 с поспіль, іде відлік і кадр знімається сам; кнопка «Зняти зараз» — без перевірки.
+const STEPS = [
+  { role: 'front', title: 'Анфас', icon: '🙂', hint: 'Дивіться прямо в камеру, обличчя в овалі',
+    check: (p) => Math.abs(p.yaw) < 0.18 && Math.abs(p.pitch) < 0.2, fix: 'Поверніть обличчя прямо до камери' },
+  { role: 'left', title: 'Лівий бік', icon: '◀', hint: 'Поверніть голову праворуч, щоб камера бачила ліву щоку',
+    check: (p) => p.near === 'left' && Math.abs(p.yaw) > 0.3 && Math.abs(p.yaw) < 0.95,
+    fix: 'Поверніть голову праворуч приблизно на 40°' },
+  { role: 'right', title: 'Правий бік', icon: '▶', hint: 'Поверніть голову ліворуч, щоб камера бачила праву щоку',
+    check: (p) => p.near === 'right' && Math.abs(p.yaw) > 0.3 && Math.abs(p.yaw) < 0.95,
+    fix: 'Поверніть голову ліворуч приблизно на 40°' },
+  { role: 'chin', title: 'Знизу', icon: '🔼', hint: 'Підніміть підборіддя і тримайте телефон нижче, щоб було видно шию',
+    check: (p) => p.pitch > 0.2 && Math.abs(p.yaw) < 0.3, fix: 'Підніміть підборіддя вище' },
+];
+const cap = { stream: null, raf: 0, step: 0, photos: {}, okSince: 0, counting: false, busy: false, lastTs: 0 };
+
 $('#btnNew').onclick = async () => {
-  show('capture');
-  try { capStream = await frontCamera($('#capVideo')); }
-  catch { toast('Камера недоступна — оберіть фото з галереї'); }
+  cap.photos = {}; cap.step = 0; cap.okSince = 0; cap.counting = false;
+  show('capture'); renderSteps();
+  $('#capPose').textContent = 'Запуск камери…'; $('#capPose').className = 'pose';
+  try { cap.stream = await frontCamera($('#capVideo')); }
+  catch { setPose('Камера недоступна — додайте фото з галереї', 'warn'); return; }
+  try { await getLandmarker('VIDEO'); } catch { setPose('Розпізнавання не запустилось', 'warn'); return; }
+  captureLoop();
 };
-$('#btnShot').onclick = () => {
+
+function stopCapture() {
+  cancelAnimationFrame(cap.raf); cap.raf = 0;
+  stopStream(cap.stream); cap.stream = null;
+}
+
+function setPose(text, cls = '') { const el = $('#capPose'); el.textContent = text; el.className = 'pose ' + cls; }
+
+function renderSteps() {
+  const box = $('#capSteps'); box.innerHTML = '';
+  STEPS.forEach((s, i) => {
+    const b = document.createElement('button');
+    b.className = 'step' + (i === cap.step ? ' on' : '') + (cap.photos[s.role] ? ' done' : '');
+    const ph = document.createElement('div'); ph.className = 'ph';
+    if (cap.photos[s.role]) { const im = new Image(); im.src = cap.photos[s.role]; im.alt = s.title; ph.append(im); }
+    else ph.textContent = s.icon;
+    const lab = document.createElement('span'); lab.textContent = s.title;
+    b.append(ph, lab);
+    b.onclick = () => { cap.step = i; cap.okSince = 0; renderSteps(); };
+    box.append(b);
+  });
+  const s = STEPS[cap.step];
+  $('#capTitle').textContent = `Фото ${cap.step + 1} з 4 · ${s.title}`;
+  $('#capHint').textContent = s.hint;
+  const all = STEPS.every((st) => cap.photos[st.role]);
+  $('#btnAnalyze').hidden = !all;
+  $('#btnShot').hidden = all;
+}
+
+function captureLoop() {
+  cap.raf = requestAnimationFrame(captureLoop);
+  const v = $('#capVideo');
+  if (v.readyState < 2 || cap.counting || cap.busy) return;
+  let ts = performance.now(); if (ts <= cap.lastTs) ts = cap.lastTs + 1; cap.lastTs = ts;
+  let res = null;
+  try { res = landmarker.detectForVideo(v, ts); } catch {}
+  const lm = res?.faceLandmarks?.[0];
+  if (!lm) { setPose('Обличчя не видно', 'warn'); cap.okSince = 0; return; }
+  const pose = headPose(lm);
+  if (pose.faceWidth < 0.22) { setPose('Наблизьте телефон до обличчя', 'warn'); cap.okSince = 0; return; }
+  const step = STEPS[cap.step];
+  if (!step.check(pose)) { setPose(step.fix, ''); cap.okSince = 0; return; }
+  if (!cap.okSince) cap.okSince = ts;
+  const held = ts - cap.okSince;
+  setPose('✓ Тримайте так', 'ok');
+  if (held > 1200) shoot(true);
+}
+
+function grabFrame(v) {
+  const cv = document.createElement('canvas');
+  const k = Math.min(1, 900 / Math.max(v.videoWidth, v.videoHeight));
+  cv.width = Math.round(v.videoWidth * k); cv.height = Math.round(v.videoHeight * k);
+  // зберігаємо дзеркально, як людина бачить себе в дзеркалі
+  const ctx = cv.getContext('2d');
+  ctx.translate(cv.width, 0); ctx.scale(-1, 1);
+  ctx.drawImage(v, 0, 0, cv.width, cv.height);
+  return cv.toDataURL('image/jpeg', 0.8);
+}
+
+function shoot(auto) {
   const v = $('#capVideo');
   if (!v.videoWidth) return toast('Камера ще не готова');
-  let n = 3; const c = $('#capCount');
+  if (cap.counting) return;
+  cap.counting = true;
+  let n = auto ? 2 : 3; const c = $('#capCount');
   c.hidden = false; c.textContent = n;
   const iv = setInterval(() => {
     n--;
     if (n > 0) { c.textContent = n; return; }
-    clearInterval(iv); c.hidden = true;
-    const cv = document.createElement('canvas');
-    const k = Math.min(1, 1100 / Math.max(v.videoWidth, v.videoHeight));
-    cv.width = Math.round(v.videoWidth * k); cv.height = Math.round(v.videoHeight * k);
-    // зберігаємо дзеркально, як людина бачить себе в дзеркалі
-    const ctx = cv.getContext('2d');
-    ctx.translate(cv.width, 0); ctx.scale(-1, 1);
-    ctx.drawImage(v, 0, 0, cv.width, cv.height);
-    openEditor(cv.toDataURL('image/jpeg', 0.85));
+    clearInterval(iv); c.hidden = true; cap.counting = false; cap.okSince = 0;
+    acceptPhoto(grabFrame(v));
   }, 1000);
-};
+}
+$('#btnShot').onclick = () => shoot(false);
+
+function acceptPhoto(data) {
+  cap.photos[STEPS[cap.step].role] = data;
+  const next = STEPS.findIndex((s) => !cap.photos[s.role]);
+  if (next >= 0) cap.step = next;
+  renderSteps();
+  if (next < 0) setPose('Усі 4 фото є — натисніть «Аналізувати»', 'ok');
+}
+
 $('#capFile').onchange = async (e) => {
   const f = e.target.files[0]; e.target.value = '';
   if (!f) return;
   const url = URL.createObjectURL(f);
   const img = await loadImage(url);
-  const k = Math.min(1, 1100 / Math.max(img.width, img.height));
+  const k = Math.min(1, 900 / Math.max(img.width, img.height));
   const cv = document.createElement('canvas');
   cv.width = Math.round(img.width * k); cv.height = Math.round(img.height * k);
   cv.getContext('2d').drawImage(img, 0, 0, cv.width, cv.height);
   URL.revokeObjectURL(url);
-  openEditor(cv.toDataURL('image/jpeg', 0.85));
+  acceptPhoto(cv.toDataURL('image/jpeg', 0.8));
 };
 
-// ---------- Редактор ----------
-const ed = { img: null, P: null, lines: [], active: 0, sel: -1, drag: null, tpl: null, view: null };
+$('#btnAnalyze').onclick = async () => {
+  cap.busy = true;
+  const photos = STEPS.map((s) => ({ role: s.role, data: cap.photos[s.role] }));
+  stopCapture();
+  openEditor({ photos });
+};
 
-async function openEditor(photo, tpl = null) {
-  show('editor');
-  ed.tpl = tpl; ed.sel = -1; ed.active = 0; ed.drag = null;
-  $('#tplName').value = tpl?.name || 'Мій контур';
-  $('#edBusy').hidden = false;
-  ed.img = await loadImage(photo);
-  ed.photo = photo;
-  try {
-    const lm = await getLandmarker('IMAGE');
-    const r = lm.detect(ed.img);
-    if (!r.faceLandmarks?.length) {
-      $('#edBusy').hidden = true;
-      toast('Обличчя не знайдено. Потрібне чітке фото анфас.', 3500);
-      return show('home');
+// Розпізнає обличчя на кожному фото і будує лінії. Повертає {P, lines, report}
+// або кидає помилку з текстом для користувача.
+async function runAnalysis(photos, onProgress) {
+  const lm = await getLandmarker('IMAGE');
+  const detected = [];
+  for (const p of photos) {
+    onProgress?.(`Шукаю обличчя: ${STEPS.find((s) => s.role === p.role)?.title || p.role}…`);
+    const img = await loadImage(p.data);
+    const r = lm.detect(img);
+    const landmarks = r.faceLandmarks?.[0];
+    if (!landmarks) {
+      if (p.role === 'front') throw new Error('На фото анфас не знайдено обличчя. Перезніміть його.');
+      continue; // бічний кадр без обличчя просто пропускаємо
     }
-    ed.P = toPx(r.faceLandmarks[0], ed.img.width, ed.img.height);
+    detected.push({ role: p.role, img, landmarks });
+  }
+  const front = detected.find((p) => p.role === 'front');
+  const P = toPx(front.landmarks, front.img.width, front.img.height);
+  onProgress?.('Шукаю межу бороди…');
+  await new Promise((r) => setTimeout(r, 30));
+  const { lines, report, debug } = analyzeBeard(detected, P);
+  report.skipped = photos.length - detected.length;
+  return { P, lines, report, debug, frontImg: front.img };
+}
+
+// ---------- Редактор ----------
+const ed = { img: null, P: null, lines: [], active: 0, sel: -1, drag: null, tpl: null, view: null, photos: [], auto: null };
+
+// draft: { photos: [{role, data}], P?, lines?, tpl? }. Без P і lines — запускає аналіз.
+async function openEditor(draft) {
+  show('editor');
+  ed.tpl = draft.tpl || null; ed.sel = -1; ed.active = 0; ed.drag = null;
+  ed.photos = draft.photos; ed.auto = null;
+  $('#tplName').value = draft.tpl?.name || 'Мій контур';
+  $('#edReport').textContent = '';
+  const busy = $('#edBusy'); busy.hidden = false; busy.textContent = 'Шукаю обличчя…';
+  const frontData = draft.photos.find((p) => p.role === 'front')?.data || draft.photos[0].data;
+  ed.photo = frontData;
+  try {
+    if (draft.P && draft.lines) {
+      ed.img = await loadImage(frontData);
+      ed.P = draft.P;
+      ed.lines = draft.lines.map((l) => ({ ...l, points: l.points.map((p) => [...p]) }));
+    } else {
+      const r = await runAnalysis(draft.photos, (t) => (busy.textContent = t));
+      ed.img = r.frontImg; ed.P = r.P; ed.auto = r;
+      ed.lines = withColors(r.lines);
+      showReport(r.report);
+    }
   } catch (err) {
     console.error(err);
-    $('#edBusy').hidden = true;
-    toast('Не вдалося запустити розпізнавання обличчя', 3500);
+    busy.hidden = true; cap.busy = false;
+    toast(err.message || 'Не вдалося проаналізувати фото', 4000);
     return show('home');
   }
-  ed.lines = tpl
-    ? tpl.lines.map((l) => ({ ...l, points: l.points.map((p) => [...p]) }))
-    : withColors(defaultLines(ed.P));
-  $('#edBusy').hidden = true;
+  busy.hidden = true; cap.busy = false;
   renderChips(); layoutEditor();
+}
+
+function showReport(r) {
+  const parts = [];
+  parts.push(r.neck ? 'шию знайдено' : 'шия: типова лінія');
+  const cheeks = (r.cheekA ? 1 : 0) + (r.cheekB ? 1 : 0);
+  parts.push(cheeks === 2 ? 'обидві щоки знайдено' : cheeks === 1 ? 'одна щока знайдена' : 'щоки: типові лінії');
+  if (r.skipped) parts.push(`${r.skipped} фото без обличчя пропущено`);
+  $('#edReport').textContent = `Аналіз ${r.photos} фото: ${parts.join(', ')}. Перевірте і підправте точки.`;
 }
 
 function withColors(lines) {
@@ -267,6 +394,17 @@ function drawEditor() {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#05080a'; ctx.fillRect(0, 0, edCanvas.width, edCanvas.height);
   drawScene(ctx, s * dpr, ox * dpr, oy * dpr, 3 * dpr);
+  // налагодження (тільки ?demo): оцінка «бородатості» кожного орієнтира
+  if (DEMO && ed.auto?.debug) {
+    const { scores, thr } = ed.auto.debug;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    scores.forEach((sc, i) => {
+      const x = ed.P[i][0] * s + ox, y = ed.P[i][1] * s + oy;
+      ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2);
+      ctx.fillStyle = sc > thr ? `rgba(255,60,60,${0.4 + 0.6 * sc})` : `rgba(80,160,255,${0.3 + 0.6 * (1 - sc)})`;
+      ctx.fill();
+    });
+  }
   // точки активної лінії
   const l = ed.lines[ed.active];
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -363,8 +501,15 @@ $('#btnDelLine').onclick = () => {
   if (ed.lines.length <= 1) return;
   ed.lines.splice(ed.active, 1); ed.active = 0; ed.sel = -1; renderChips(); drawEditor();
 };
-$('#btnReset').onclick = () => {
-  ed.lines = withColors(defaultLines(ed.P)); ed.active = 0; ed.sel = -1; renderChips(); drawEditor();
+$('#btnReset').onclick = async () => {
+  if (!ed.auto) {
+    const busy = $('#edBusy'); busy.hidden = false;
+    try { ed.auto = await runAnalysis(ed.photos, (t) => (busy.textContent = t)); }
+    catch (err) { busy.hidden = true; return toast(err.message || 'Не вдалося проаналізувати', 4000); }
+    busy.hidden = true;
+  }
+  ed.lines = withColors(ed.auto.lines); ed.active = 0; ed.sel = -1;
+  showReport(ed.auto.report); renderChips(); drawEditor();
   toast('Лінії повернуто до автоматичних');
 };
 
@@ -376,6 +521,7 @@ $('#btnSave').onclick = () => {
     name: $('#tplName').value.trim() || 'Мій контур',
     created: ed.tpl?.created || Date.now(),
     photo: ed.photo,
+    photos: ed.photos,
     P: P.map(round),
     lines: ed.lines.map((l) => ({
       id: l.id, name: l.name, color: l.color, shave: l.shave,

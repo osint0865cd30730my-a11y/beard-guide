@@ -1,7 +1,7 @@
 // Офлайн-кеш: застосунок і модель працюють без інтернету після першого відкриття.
-const CACHE = 'beardguide-v1';
+const CACHE = 'beardguide-v2';
 const CORE = ['./', 'index.html', 'styles.css', 'app.js', 'face.js', 'manifest.webmanifest', 'icon.svg',
-  'vendor/vision_bundle.mjs', 'vendor/face_landmarker.task'];
+  'analyze.js', 'vendor/vision_bundle.mjs', 'vendor/face_landmarker.task'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(CORE)).then(() => self.skipWaiting()));

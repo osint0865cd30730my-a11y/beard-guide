@@ -24,29 +24,32 @@
       <div id="templates" class="templates"></div>
       <div id="empty" class="empty" hidden>
         <svg viewBox="0 0 120 120" aria-hidden="true"><path d="M30 40c0 30 10 55 30 60s30-30 30-60" fill="none" stroke="currentColor" stroke-width="3" stroke-dasharray="6 6"/><circle cx="60" cy="45" r="28" fill="none" stroke="currentColor" stroke-width="2" opacity=".4"/></svg>
-        <p><b>Поки що немає контуру.</b><br>Сфотографуйтесь з охайною бородою (або після барбера) і позначте лінії шиї та щік. Далі камера накладатиме їх на ваше обличчя під час гоління.</p>
+        <p><b>Поки що немає контуру.</b><br>Зробіть чотири фото з охайною бородою (анфас, два боки, знизу). Застосунок сам знайде межу бороди і побудує лінії, а камера накладатиме їх на обличчя під час гоління.</p>
       </div>
     </div>
     <footer class="actions">
-      <button id="btnNew" class="primary big">Новий контур з фото</button>
+      <button id="btnNew" class="primary big">Новий контур (4 фото)</button>
     </footer>
   </section>
 
-  <!-- Зйомка фото -->
+  <!-- Зйомка чотирьох фото -->
   <section id="capture" class="screen" hidden>
     <header class="bar row">
       <button class="ghost" data-back>‹ Назад</button>
-      <h2>Фото-шаблон</h2>
+      <h2 id="capTitle">Фото 1 з 4</h2>
     </header>
+    <div id="capSteps" class="steps"></div>
     <div class="stage">
       <video id="capVideo" playsinline muted autoplay></video>
       <div class="oval" aria-hidden="true"></div>
+      <div id="capPose" class="pose">Запуск камери…</div>
       <div id="capCount" class="count" hidden></div>
-      <p class="hint">Дивіться прямо, обличчя в овалі, рівне світло спереду</p>
+      <p id="capHint" class="hint"></p>
     </div>
     <footer class="actions row">
-      <label class="ghost file">Обрати з галереї<input id="capFile" type="file" accept="image/*"></label>
-      <button id="btnShot" class="primary">Зробити фото (3 с)</button>
+      <label class="ghost file">З галереї<input id="capFile" type="file" accept="image/*"></label>
+      <button id="btnShot" class="ghost">Зняти зараз</button>
+      <button id="btnAnalyze" class="primary" hidden>Аналізувати</button>
     </footer>
   </section>
 
@@ -61,6 +64,7 @@
       <div id="edBusy" class="busy" hidden>Шукаю обличчя…</div>
     </div>
     <div class="tools">
+      <p id="edReport" class="tip report"></p>
       <div id="lineChips" class="chips"></div>
       <div class="row tight">
         <button id="btnDelPt" class="ghost sm" disabled>Видалити точку</button>
@@ -68,7 +72,7 @@
         <button id="btnDelLine" class="ghost sm" disabled>Видалити лінію</button>
         <button id="btnReset" class="ghost sm">Авто</button>
       </div>
-      <p class="tip">Тягніть точки. Торкніться лінії між точками, щоб додати нову.</p>
+      <p class="tip">Тягніть точки. Торкніться лінії між точками, щоб додати нову. «Авто» повертає знайдені лінії.</p>
     </div>
     <footer class="actions">
       <button id="btnSave" class="primary big">Зберегти контур</button>

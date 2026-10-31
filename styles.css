@@ -61,6 +61,17 @@ label.file input { display: none; }
 .stage video { width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
 .stage .oval { position: absolute; left: 50%; top: 46%; width: 62%; aspect-ratio: 3/4; transform: translate(-50%, -50%); border: 2px dashed rgba(255,255,255,.55); border-radius: 50%; pointer-events: none; }
 .stage .hint { position: absolute; left: 0; right: 0; bottom: 10px; margin: 0; text-align: center; font-size: 13px; color: #fff; text-shadow: 0 1px 3px #000; padding-inline: 12px; }
+.steps { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; padding-bottom: 10px; }
+.step { border: 1px solid var(--line); background: var(--panel); border-radius: 10px; padding: 0; overflow: hidden; text-align: center; font-size: 12px; color: var(--muted); display: flex; flex-direction: column; }
+.step .ph { aspect-ratio: 3/4; background: #05080a; display: grid; place-items: center; font-size: 22px; }
+.step .ph img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.step span { padding: 4px 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.step.on { border-color: var(--accent); color: var(--accent); }
+.step.done { color: var(--fg); }
+.pose { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); background: rgba(0,0,0,.55); color: #fff; padding: 7px 12px; border-radius: 999px; font-size: 13px; white-space: nowrap; max-width: calc(100% - 24px); overflow: hidden; text-overflow: ellipsis; }
+.pose.ok { background: var(--accent); color: #062019; font-weight: 700; }
+.pose.warn { color: var(--warn); }
+.report { color: var(--fg); }
 .count { position: absolute; inset: 0; display: grid; place-items: center; font-size: 96px; font-weight: 800; color: #fff; text-shadow: 0 2px 12px rgba(0,0,0,.6); }
 .stage.edit { background: #05080a; touch-action: none; }
 .stage canvas { width: 100%; height: 100%; display: block; touch-action: none; }
