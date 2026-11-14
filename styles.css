@@ -115,3 +115,6 @@ label.file input { display: none; }
 .edsteps .ph { aspect-ratio: 16/9; }
 .edsteps .step span { font-size: 11px; }
 .step.off { opacity: .4; }
+
+.live.clean .overlay-bottom, .live.clean .thumb { display: none; }
+.overlay-bottom .row.tight { justify-content: center; }

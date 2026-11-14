@@ -198,25 +198,46 @@ export function analyzeBeard(photos, frontP) {
     return w > 0.15 ? sw / w : null;
   };
 
-  // Лінія щоки: стовпчики від вуха до кута рота, у кожному шукаємо, де
-  // починається борода (три поспіль «бородаті» проби).
+  // Лінія щоки: стовпчики від вуха до кута рота. У кожному шукаємо не абсолютний
+  // поріг, а найрізкіший перепад «шкіра зверху → борода знизу»: так тінь на
+  // половині обличчя не зсуває межу.
   const cheek = (sign) => {
     const pts = [];
     for (let c = 0; c <= 8; c++) {
       const u = sign * (0.95 - c * 0.07);
       // біля вуха починаємо нижче бакенбардів, біля рота — нижче носа
-      const vStart = Math.abs(u) > 0.45 ? 0.38 : 0.6;
-      let found = null, run = 0;
-      for (let v = vStart; v <= 1.1; v += 0.02) {
-        const s = at(F.pt(u, v));
-        if (s === null) { run = 0; continue; }
-        if (s > thr) { run++; if (run === 3) { found = v - 0.04; break; } }
-        else run = 0;
+      const vStart = Math.abs(u) > 0.45 ? 0.3 : 0.55;
+      const col = [];
+      for (let v = vStart; v <= 1.08; v += 0.02) { const s = at(F.pt(u, v)); if (s !== null) col.push({ v, s }); }
+      const W = 4;
+      let best = null;
+      for (let i = W; i + W <= col.length; i++) {
+        let up = 0, dn = 0;
+        for (let k = 1; k <= W; k++) { up += col[i - k].s; dn += col[i + k - 1].s; }
+        const step = (dn - up) / W;
+        if (!best || step > best.step) best = { step, v: col[i].v, dn: dn / W };
       }
-      if (found !== null) pts.push({ u, v: found });
+      if (best && best.step > 0.07 && best.dn > thr * 0.7) pts.push({ u, v: best.v });
     }
     if (pts.length < 4) return null;
-    const vs = smooth3(pts.map((p) => p.v));
+    // Межа щоки — плавна лінія: пряма v(|u|) без викидів (тінь, відблиск).
+    const line1 = (data) => {
+      const n = data.length;
+      let sx = 0, sy = 0, sxx = 0, sxy = 0;
+      data.forEach(({ u, v }) => { const x = Math.abs(u); sx += x; sy += v; sxx += x * x; sxy += x * v; });
+      const den = n * sxx - sx * sx;
+      if (Math.abs(den) < 1e-9) return null;
+      const b = (n * sxy - sx * sy) / den, a0 = (sy - b * sx) / n;
+      return (u) => a0 + b * Math.abs(u);
+    };
+    const med = smooth3(pts.map((p) => p.v));
+    let f = line1(pts.map((p, i) => ({ u: p.u, v: med[i] })));
+    if (!f) return null;
+    const inl = pts.filter((p) => Math.abs(p.v - f(p.u)) < 0.07);
+    if (inl.length < 4) return null;
+    f = line1(inl) || f;
+    // пряма задає напрям, а дрібний вигин беремо з самих точок (половина відхилення)
+    const vs = pts.map((p) => { const base = f(p.u), dv = Math.max(-0.04, Math.min(0.04, p.v - base)); return base + dv * 0.3; });
     const line = pts.map((p, i) => F.pt(p.u, vs[i]));
     // залишаємо 5–6 точок, щоб зручно редагувати
     const step = Math.max(1, Math.round(line.length / 5));
@@ -227,7 +248,7 @@ export function analyzeBeard(photos, frontP) {
 
   // Лінія шиї: глибина бороди під щелепою з кадру знизу (або анфас).
   const neckSrc = per.find((p) => p.role === 'chin' && p.neck) || per.find((p) => p.role === 'front' && p.neck);
-  let neck = null, neckFound = 0;
+  let neck = null, neckFound = 0, neckRole = 'front';
   if (neckSrc) {
     const ks = neckSrc.neck.map((samples) => {
       const valid = samples.filter((x) => x.s >= 0);
@@ -243,11 +264,13 @@ export function analyzeBeard(photos, frontP) {
     neckFound = ks.filter((k) => k !== null).length;
     if (neckFound >= 4) {
       const fill = median(ks.filter((k) => k !== null));
-      // У кадрі знизу під щелепа видно повністю, а в анфас (і в дзеркалі під час
-      // гоління) вона скорочена перспективою — тому глибину зменшуємо.
-      const scale = neckSrc.role === 'chin' ? 0.6 : 1;
-      const kk = smooth3(ks.map((k) => Math.min(0.4, Math.max(0.03, (k === null ? fill : k) * scale))));
-      neck = JAW.map((j, i) => [frontP[j][0] + F.down[0] * kk[i] * F.h, frontP[j][1] + F.down[1] * kk[i] * F.h]);
+      // Точки лишаються в координатах того фото, де їх знайдено (кадр знизу або
+      // анфас): прив'язка до 3D-системи голови сама перенесе їх на інші ракурси.
+      const src = photos[per.indexOf(neckSrc)];
+      const NP = toPx(src.landmarks, src.img.width, src.img.height), NF = faceFrame(NP);
+      const kk = smooth3(ks.map((k) => Math.min(0.7, Math.max(0.03, k === null ? fill : k))));
+      neck = JAW.map((j, i) => [NP[j][0] + NF.down[0] * kk[i] * NF.h, NP[j][1] + NF.down[1] * kk[i] * NF.h]);
+      neckRole = src.role;
     }
   }
 
@@ -263,9 +286,9 @@ export function analyzeBeard(photos, frontP) {
     report,
     debug: { scores, thr, neck: neckSrc?.neck || null },
     lines: [
-      { id: 'neck', name: 'Шия', points: neck || fallback.neck, auto: !!neck },
-      { id: 'cheekA', name: 'Щока', points: cheekA || fallback.cheekA, auto: !!cheekA },
-      { id: 'cheekB', name: 'Щока', points: cheekB || fallback.cheekB, auto: !!cheekB },
+      { id: 'neck', name: 'Шия', points: neck || fallback.neck, auto: !!neck, role: neck ? neckRole : 'front' },
+      { id: 'cheekA', name: 'Щока', points: cheekA || fallback.cheekA, auto: !!cheekA, role: 'front' },
+      { id: 'cheekB', name: 'Щока', points: cheekB || fallback.cheekB, auto: !!cheekB, role: 'front' },
     ],
   };
 }

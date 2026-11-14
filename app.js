@@ -1,5 +1,5 @@
 import { FaceLandmarker, FilesetResolver } from './vendor/vision_bundle.mjs';
-import { toPx, anchorPoint, resolvePoint, tracePath, distToSegment } from './face.js';
+import { toPx, toPx3, makeView, anchorAt, resolveAnchor, mirrorPoints, LandmarkFilter, tracePath, distToSegment } from './face.js';
 import { analyzeBeard, headPose } from './analyze.js';
 
 const $ = (s) => document.querySelector(s);
@@ -83,7 +83,12 @@ function renderHome() {
     const go = Object.assign(document.createElement('button'), { className: 'go', textContent: 'Голитися' });
     const ed = Object.assign(document.createElement('button'), { className: 'ghost', textContent: 'Змінити' });
     const del = Object.assign(document.createElement('button'), { className: 'ghost', textContent: '✕', title: 'Видалити' });
-    go.onclick = () => startLive(tpl);
+    go.onclick = () => {
+      if (tpl.v === 2) return startLive(tpl);
+      // контур зі старої версії: перераховуємо прив'язку і просимо зберегти
+      toast('Контур оновлено до нової версії — перевірте і збережіть', 4000);
+      ed.onclick();
+    };
     ed.onclick = () => openEditor({ photos: tpl.photos || [{ role: 'front', data: tpl.photo, P: tpl.P }], lines: tpl.lines, tpl });
     del.onclick = () => {
       if (del.dataset.armed) {
@@ -270,7 +275,11 @@ async function loadPhotos(photos, onProgress) {
     if (p.P && p.landmarks) landmarks = p.landmarks;
     else landmarks = lm.detect(img).faceLandmarks?.[0] || null;
     if (!landmarks && p.role === 'front') throw new Error('На фото анфас не знайдено обличчя. Перезніміть його.');
-    out.push({ role: p.role, data: p.data, img, landmarks, P: landmarks ? toPx(landmarks, img.width, img.height) : null });
+    out.push({
+      role: p.role, data: p.data, img, landmarks,
+      P: landmarks ? toPx(landmarks, img.width, img.height) : null,
+      view: landmarks ? makeView(toPx3(landmarks, img.width, img.height)) : null,
+    });
   }
   return out;
 }
@@ -294,8 +303,11 @@ const ed = { photos: [], cur: 0, lines: [], active: 0, sel: -1, drag: null, tpl:
 
 const curPhoto = () => ed.photos[ed.cur];
 const frontPhoto = () => ed.photos.find((p) => p.role === 'front') || ed.photos[0];
-const linePts = (l, P = curPhoto().P) => l.anchors.map((a) => resolvePoint(a, P));
-const toAnchors = (points, P) => points.map((p) => anchorPoint(p, P));
+const photoFor = (role) => ed.photos.find((p) => p.role === role && p.view) || frontPhoto();
+const linePts = (l, ph = curPhoto()) => l.anchors.map((a) => resolveAnchor(a, ph.view));
+const toAnchors = (points, ph) => points.map((p) => anchorAt(p, ph.view));
+// лінії аналізу задані в пікселях того фото, де їх знайдено (l.role)
+const autoLines = (lines) => withColors(lines).map((l) => ({ ...l, anchors: toAnchors(l.points, photoFor(l.role)) }));
 
 // draft: { photos: [{role, data, P?, landmarks?}], lines? (з anchors), tpl? }. Без lines — запускає аналіз.
 async function openEditor(draft) {
@@ -307,12 +319,15 @@ async function openEditor(draft) {
   try {
     ed.photos = await loadPhotos(draft.photos, (t) => (busy.textContent = t));
     ed.cur = ed.photos.indexOf(frontPhoto());
-    if (draft.lines?.every((l) => l.anchors)) {
-      ed.lines = draft.lines.map((l) => ({ ...l, anchors: l.anchors.map((a) => ({ t: a.t, w: [...a.w] })) }));
+    if (draft.tpl?.v === 2 && draft.lines?.every((l) => l.anchors)) {
+      ed.lines = draft.lines.map((l) => ({ ...l, anchors: l.anchors.map((a) => (a.q ? { q: [...a.q] } : { t: a.t, w: [...a.w] })) }));
+    } else if (draft.lines?.every((l) => l.points)) {
+      // контур зі старої версії: точки в пікселях анфасу прив'язуємо заново
+      ed.lines = draft.lines.map((l) => ({ ...l, anchors: toAnchors(l.points, frontPhoto()) }));
     } else {
       const r = await runAnalysis(ed.photos, (t) => (busy.textContent = t));
       ed.auto = r;
-      ed.lines = withColors(r.lines).map((l) => ({ ...l, anchors: toAnchors(l.points, frontPhoto().P) }));
+      ed.lines = autoLines(r.lines);
       showReport(r.report);
     }
   } catch (err) {
@@ -372,13 +387,14 @@ function renderChips() {
   const l = ed.lines[ed.active];
   $('#btnDelLine').disabled = !l || ed.lines.length <= 1;
   $('#btnDelPt').disabled = !(l && ed.sel >= 0 && l.anchors.length > 2);
+  $('#btnSym').disabled = !l?.id.startsWith('cheek');
 }
 
 function lineLabel(l) {
   if (l.id === 'neck') return 'Лінія шиї';
   if (l.id.startsWith('cheek')) {
     // підписуємо за кадром анфасу, як людина бачить себе в дзеркалі
-    const P = frontPhoto().P, pts = linePts(l, P);
+    const P = frontPhoto().P, pts = linePts(l, frontPhoto());
     const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length;
     return cx < P[1][0] ? 'Щока ліворуч' : 'Щока праворуч';
   }
@@ -498,7 +514,7 @@ edCanvas.addEventListener('pointerdown', (e) => {
     for (let i = 0; i < pts.length - 1; i++) {
       const { d } = distToSegment(sp, toScr(pts[i]), toScr(pts[i + 1]));
       if (d < 16) {
-        ed.lines[li].anchors.splice(i + 1, 0, anchorPoint(toImg(sp), P));
+        ed.lines[li].anchors.splice(i + 1, 0, anchorAt(toImg(sp), curPhoto().view));
         ed.active = li; ed.sel = i + 1; ed.drag = { i: i + 1, dx: 0, dy: 0 };
         try { edCanvas.setPointerCapture(e.pointerId); } catch {}
         renderChips(); drawEditor(); return;
@@ -510,7 +526,8 @@ edCanvas.addEventListener('pointerdown', (e) => {
 edCanvas.addEventListener('pointermove', (e) => {
   if (!ed.drag) return;
   const ip = toImg(evPoint(e));
-  ed.lines[ed.active].anchors[ed.drag.i] = anchorPoint([ip[0] + ed.drag.dx, ip[1] + ed.drag.dy], curPhoto().P);
+  const anchors = ed.lines[ed.active].anchors;
+  anchors[ed.drag.i] = anchorAt([ip[0] + ed.drag.dx, ip[1] + ed.drag.dy], curPhoto().view, anchors[ed.drag.i]);
   drawEditor();
 });
 const endDrag = () => { if (ed.drag) { ed.drag = null; drawEditor(); } };
@@ -527,8 +544,21 @@ $('#btnAddLine').onclick = () => {
   const a = [P[61][0], P[2][1] + (P[0][1] - P[2][1]) * 0.4], b = [P[291][0], a[1]];
   const n = ed.lines.filter((l) => l.id.startsWith('custom')).length + 1;
   ed.lines.push({ id: 'custom' + Date.now(), name: 'Лінія ' + n, color: LINE_COLORS[ed.lines.length % LINE_COLORS.length], shave: null,
-    anchors: toAnchors([a, [(a[0] + b[0]) / 2, a[1]], b], P) });
+    anchors: toAnchors([a, [(a[0] + b[0]) / 2, a[1]], b], curPhoto()) });
   ed.active = ed.lines.length - 1; ed.sel = -1; renderChips(); drawEditor();
+};
+// Симетрія: дзеркальна копія активної щоки на іншу щоку (відносно осі обличчя на анфасі).
+$('#btnSym').onclick = () => {
+  const l = ed.lines[ed.active];
+  if (!l?.id.startsWith('cheek')) return;
+  const front = frontPhoto();
+  const otherId = l.id === 'cheekA' ? 'cheekB' : 'cheekA';
+  const anchors = toAnchors(mirrorPoints(linePts(l, front), front.view), front);
+  const other = ed.lines.find((x) => x.id === otherId);
+  if (other) other.anchors = anchors;
+  else ed.lines.push({ id: otherId, name: 'Щока', color: LINE_COLORS[ed.lines.length % LINE_COLORS.length], shave: 'up', anchors });
+  renderChips(); drawEditor();
+  toast('Другу щоку зроблено симетричною');
 };
 $('#btnDelLine').onclick = () => {
   if (ed.lines.length <= 1) return;
@@ -541,7 +571,7 @@ $('#btnReset').onclick = async () => {
     catch (err) { busy.hidden = true; return toast(err.message || 'Не вдалося проаналізувати', 4000); }
     busy.hidden = true;
   }
-  ed.lines = withColors(ed.auto.lines).map((l) => ({ ...l, anchors: toAnchors(l.points, frontPhoto().P) }));
+  ed.lines = autoLines(ed.auto.lines);
   ed.active = 0; ed.sel = -1;
   showReport(ed.auto.report); renderChips(); drawEditor();
   toast('Лінії повернуто до автоматичних');
@@ -551,6 +581,7 @@ $('#btnSave').onclick = () => {
   const front = frontPhoto();
   const round = (p) => [Math.round(p[0] * 10) / 10, Math.round(p[1] * 10) / 10];
   const tpl = {
+    v: 2,
     id: ed.tpl?.id || 't' + Date.now(),
     name: $('#tplName').value.trim() || 'Мій контур',
     created: ed.tpl?.created || Date.now(),
@@ -560,8 +591,10 @@ $('#btnSave').onclick = () => {
     P: front.P.map(round),
     lines: ed.lines.map((l) => ({
       id: l.id, name: l.name, color: l.color, shave: l.shave,
-      points: linePts(l, front.P).map(round),
-      anchors: l.anchors.map((a) => ({ t: a.t, w: a.w.map((x) => Math.round(x * 10000) / 10000) })),
+      points: linePts(l, front).map(round),
+      anchors: l.anchors.map((a) => (a.q
+        ? { q: a.q.map((x) => Math.round(x * 1e5) / 1e5) }
+        : { t: a.t, w: a.w.map((x) => Math.round(x * 1e5) / 1e5) })),
     })),
   };
   const list = loadTemplates().filter((t) => t.id !== tpl.id);
@@ -571,14 +604,15 @@ $('#btnSave').onclick = () => {
 
 // ---------- Живий режим ----------
 const live = {
-  tpl: null, stream: null, raf: 0, smooth: null, mirror: true, color: -1, zone: false,
-  frozen: false, wake: null, src: null, demoImg: null, lastSeen: 0, width: 3,
+  tpl: null, stream: null, raf: 0, view: null, filter: new LandmarkFilter(), mirror: true, color: -1, zone: false,
+  frozen: false, wake: null, src: null, demoImg: null, lastSeen: 0, width: 3, zoom: 1, cx: null, cy: null,
 };
 const lc = $('#liveCanvas');
+if (DEMO) window.__live = live;
 
 async function startLive(tpl) {
   show('live');
-  live.tpl = tpl; live.smooth = null; live.frozen = false; live.lastSeen = 0;
+  live.tpl = tpl; live.view = null; live.filter.reset(); live.frozen = false; live.lastSeen = 0; live.cx = null;
   $('#btnFreeze').textContent = '❚❚';
   drawThumb($('#liveThumb'), tpl);
   setStatus('Запуск камери…');
@@ -615,16 +649,36 @@ function setStatus(text, cls = '') {
 let lastTs = 0;
 function loop() {
   live.raf = requestAnimationFrame(loop);
-  if (live.frozen) return;
+  if (!live.frozen) step(performance.now());
+}
+// демо: покадрова симуляція з фіксованим кроком часу (не залежить від частоти екрана)
+if (DEMO) window.__sim = (frames, dtMs = 33) => { for (let i = 0; i < frames; i++) step(lastTs + dtMs); };
+
+function step(now) {
   const src = live.src;
   let sw, sh;
   if (DEMO) {
     // імітація руху голови для перевірки без камери
-    const t = performance.now() / 1000, img = live.demoImg, c = src.getContext('2d');
+    const t = now / 1000, img = live.demoImg, c = src.getContext('2d');
     c.setTransform(1, 0, 0, 1, 0, 0); c.fillStyle = '#111'; c.fillRect(0, 0, src.width, src.height);
-    c.translate(src.width / 2 + Math.sin(t * 0.9) * src.width * 0.06, src.height / 2 + Math.sin(t * 0.6) * src.height * 0.03);
-    c.rotate(Math.sin(t * 0.7) * 0.15); c.scale(1 + Math.sin(t * 0.5) * 0.06, 1 + Math.sin(t * 0.5) * 0.06);
+    const mv = window.__still ? 0 : 1; // __still: нерухома голова, щоб виміряти тремтіння
+    c.translate(src.width / 2 + mv * Math.sin(t * 0.9) * src.width * 0.06, src.height / 2 + mv * Math.sin(t * 0.6) * src.height * 0.03);
+    c.rotate(mv * Math.sin(t * 0.7) * 0.15); c.scale(1 + mv * Math.sin(t * 0.5) * 0.06, 1 + mv * Math.sin(t * 0.5) * 0.06);
+    live.demoM = c.getTransform().translate(-img.width / 2, -img.height / 2);
     c.drawImage(img, -img.width / 2, -img.height / 2);
+    if (window.__noise) {
+      // шум «як у камери»: без нього детектор на однаковому кадрі дає однаковий результат
+      const nz = (live.noise ??= (() => {
+        const n = document.createElement('canvas'); n.width = n.height = 256;
+        const x = n.getContext('2d'), d = x.createImageData(256, 256);
+        for (let i = 0; i < d.data.length; i += 4) { const v = Math.random() * 255; d.data[i] = d.data[i + 1] = d.data[i + 2] = v; d.data[i + 3] = 255; }
+        x.putImageData(d, 0, 0); return n;
+      })());
+      c.setTransform(1, 0, 0, 1, 0, 0); c.globalAlpha = window.__noise;
+      const ox0 = -Math.random() * 256, oy0 = -Math.random() * 256;
+      for (let y = oy0; y < src.height; y += 256) for (let x = ox0; x < src.width; x += 256) c.drawImage(nz, x, y);
+      c.globalAlpha = 1;
+    }
     sw = src.width; sh = src.height;
   } else {
     if (src.readyState < 2) return;
@@ -635,26 +689,28 @@ function loop() {
   const W = Math.round(r.width * dpr), H = Math.round(r.height * dpr);
   if (lc.width !== W || lc.height !== H) { lc.width = W; lc.height = H; }
 
-  let ts = performance.now(); if (ts <= lastTs) ts = lastTs + 1; lastTs = ts;
+  let ts = now; if (ts <= lastTs) ts = lastTs + 1; lastTs = ts;
   let res = null;
   try { res = landmarker.detectForVideo(src, ts); } catch (e) { console.warn(e); }
   const raw = res?.faceLandmarks?.[0];
   if (raw) {
-    const P = toPx(raw, sw, sh);
-    if (!live.smooth) live.smooth = P;
-    else {
-      const a = 0.55;
-      for (let i = 0; i < P.length; i++) {
-        live.smooth[i][0] += (P[i][0] - live.smooth[i][0]) * a;
-        live.smooth[i][1] += (P[i][1] - live.smooth[i][1]) * a;
-      }
-    }
+    const P3 = toPx3(raw, sw, sh);
+    const fw = Math.hypot(P3[454][0] - P3[234][0], P3[454][1] - P3[234][1], P3[454][2] - P3[234][2]) || 1;
+    // після втрати обличчя фільтр починаємо заново, щоб лінії не «пливли» зі старого місця
+    if (ts - live.lastSeen > 400) live.filter.reset();
+    live.view = makeView(live.filter.apply(P3, ts, fw));
     live.lastSeen = ts;
   }
 
   const ctx = lc.getContext('2d');
-  const s = Math.max(W / sw, H / sh);
-  const ox = (W - sw * s) / 2, oy = (H - sh * s) / 2;
+  const s = Math.max(W / sw, H / sh) * live.zoom;
+  // при збільшенні кадр плавно тримає обличчя в центрі екрана
+  let tx = sw / 2, ty = sh / 2;
+  if (live.zoom > 1 && live.view) { tx = live.view.f.O[0]; ty = live.view.f.O[1] + live.view.f.s * 0.25; }
+  if (live.cx === null) { live.cx = tx; live.cy = ty; }
+  live.cx += (tx - live.cx) * 0.08; live.cy += (ty - live.cy) * 0.08;
+  const ox = Math.min(0, Math.max(W - sw * s, W / 2 - live.cx * s));
+  const oy = Math.min(0, Math.max(H - sh * s, H / 2 - live.cy * s));
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.fillStyle = '#000'; ctx.fillRect(0, 0, W, H);
   if (live.mirror) ctx.setTransform(-s, 0, 0, s, W - ox, oy);
@@ -662,12 +718,25 @@ function loop() {
   ctx.drawImage(src, 0, 0, sw, sh);
 
   const fresh = ts - live.lastSeen < 400;
-  if (live.smooth && fresh) {
-    const P = live.smooth;
+  if (live.view && fresh) {
+    const P = live.view.P;
     const lw = (live.width * dpr) / s;
     if (live.zone) drawZones(ctx, P);
     live.tpl.lines.forEach((l) => {
-      const pts = l.anchors.map((a) => resolvePoint(a, P));
+      const pts = l.anchors.map((a) => resolveAnchor(a, live.view));
+      if (DEMO && live.demoM) {
+        // самоперевірка в демо: відхилення ліній від відомого положення шаблону, у % ширини обличчя
+        const d = (window.__err ??= { n: 0, sum: 0, max: 0 });
+        pts.forEach((p, i) => {
+          const t = live.demoM.transformPoint({ x: l.points[i][0], y: l.points[i][1] });
+          const e = Math.hypot(p[0] - t.x, p[1] - t.y) / live.view.f.s * 100;
+          d.n++; d.sum += e; d.max = Math.max(d.max, e);
+        });
+        // тремтіння: зсув точок між сусідніми кадрами
+        const prev = (d.prev ??= {})[l.id];
+        if (prev) pts.forEach((p, i) => { d.jn = (d.jn || 0) + 1; d.jsum = (d.jsum || 0) + Math.hypot(p[0] - prev[i][0], p[1] - prev[i][1]) / live.view.f.s * 100; });
+        d.prev[l.id] = pts;
+      }
       strokeLine(ctx, pts, live.color < 0 ? l.color : COLORS[live.color], lw);
     });
     status(P, sw, s, W);
@@ -695,7 +764,7 @@ function drawZones(ctx, P) {
   ctx.fillStyle = 'rgba(255,90,90,.22)';
   live.tpl.lines.forEach((l) => {
     if (!l.shave) return;
-    const pts = l.anchors.map((a) => resolvePoint(a, P));
+    const pts = l.anchors.map((a) => resolveAnchor(a, live.view));
     const k = l.shave === 'down' ? h * 0.7 : -h * 0.22;
     ctx.beginPath(); tracePath(ctx, pts);
     for (let i = pts.length - 1; i >= 0; i--) ctx.lineTo(pts[i][0] + down[0] * k, pts[i][1] + down[1] * k);
@@ -716,6 +785,13 @@ $('#btnFreeze').onclick = (e) => {
   if (live.frozen) setStatus('Пауза — кадр зафіксовано');
 };
 $('#lineWidth').oninput = (e) => (live.width = +e.target.value);
+$('#btnZoom').onclick = (e) => {
+  live.zoom = live.zoom >= 2 ? 1 : live.zoom + 0.5;
+  e.target.textContent = live.zoom === 1 ? 'Збільшити' : `×${live.zoom}`;
+  e.target.classList.toggle('on', live.zoom > 1);
+};
+// дотик до кадру ховає і повертає панелі, щоб нічого не затуляло обличчя
+lc.addEventListener('click', () => $('#live').classList.toggle('clean'));
 document.addEventListener('visibilitychange', async () => {
   if (current === 'live' && document.visibilityState === 'visible' && !live.wake) {
     try { live.wake = await navigator.wakeLock?.request('screen'); } catch {}
